@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"employee/internal/biz"
+	"employee/internal/service/dto"
 
 	"github.com/go-kratos/kratos/v2/errors"
 	khttp "github.com/go-kratos/kratos/v2/transport/http"
@@ -19,23 +20,31 @@ func NewEmployeeService(uc *biz.EmployeeUsecase) *EmployeeService {
 }
 
 func (s *EmployeeService) CreateEmployee(ctx khttp.Context) error {
-	var emp biz.Employee
-
-	if err := ctx.Bind(&emp); err != nil {
+	var req dto.CreateEmployeeRequest
+	if err := ctx.Bind(&req); err != nil {
 		return errors.BadRequest("INVALID_BODY", err.Error())
 	}
 
-	res, err := s.uc.CreateEmployee(ctx, &emp)
+	employee := FromCreateRequest(&req)
+	created, err := s.uc.CreateEmployee(ctx, employee)
 	if err != nil {
-		return err
+		switch err.Error() {
+		case "employee name is required", "employee email is required", "employee role is required", "invalid email format":
+			return errors.BadRequest("INVALID_INPUT", err.Error())
+		case "employee with this email already exists":
+			return errors.Conflict("DUPLICATE_EMPLOYEE", err.Error())
+		default:
+			return errors.New(500, "SERVER_ERROR", err.Error())
+
+		}
 	}
 
-	return ctx.JSON(http.StatusCreated, res)
+	resp := ToEmployeeResponse(created)
+	return ctx.JSON(http.StatusCreated, resp)
 }
 
 func (s *EmployeeService) GetEmployee(ctx khttp.Context) error {
 	vars := ctx.Vars()
-
 	idStr, ok := vars["id"]
 	if !ok {
 		return errors.BadRequest("MISSING_ID", "employee id is required")
@@ -46,29 +55,58 @@ func (s *EmployeeService) GetEmployee(ctx khttp.Context) error {
 		return errors.BadRequest("INVALID_ID", "employee id must be a number")
 	}
 
-	res, err := s.uc.GetEmployee(ctx, id)
+	employee, err := s.uc.GetEmployee(ctx, id)
 	if err != nil {
-		return err
+		switch err.Error() {
+		case "employee not found":
+			return errors.NotFound("EMPLOYEE_NOT_FOUND", err.Error())
+		default:
+			return errors.New(500, "SERVER_ERROR", err.Error())
+
+		}
 	}
 
-	return ctx.JSON(http.StatusOK, res)
+	resp := ToEmployeeResponse(employee)
+	return ctx.JSON(http.StatusOK, resp)
 }
 
 func (s *EmployeeService) ListEmployees(ctx khttp.Context) error {
-
-	offset, _ := strconv.Atoi(ctx.Query().Get("offset"))
-	limit, _ := strconv.Atoi(ctx.Query().Get("limit"))
-
-	res, err := s.uc.ListEmployees(ctx, offset, limit)
-	if err != nil {
-		return err
+	// Parse query params
+	page, _ := strconv.Atoi(ctx.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	size, _ := strconv.Atoi(ctx.Query().Get("size"))
+	if size < 1 {
+		size = 10
 	}
 
-	return ctx.JSON(http.StatusOK, res)
+	offset := (page - 1) * size
+
+	employees, err := s.uc.ListEmployees(ctx, offset, size)
+	if err != nil {
+		return errors.New(500, "SERVER_ERROR", err.Error())
+
+	}
+
+	resp := ToEmployeeResponseList(employees)
+
+	// Include pagination metadata
+	return ctx.JSON(http.StatusOK, map[string]interface{}{
+		"data": resp,
+		"meta": map[string]interface{}{
+			"page":  page,
+			"size":  size,
+			"total": len(employees), // in real projects, fetch total count from DB
+		},
+	})
 }
 
 func (s *EmployeeService) UpdateEmployee(ctx khttp.Context) error {
-	var emp biz.Employee
+	var req dto.UpdateEmployeeRequest
+	if err := ctx.Bind(&req); err != nil {
+		return errors.BadRequest("INVALID_BODY", err.Error())
+	}
 
 	vars := ctx.Vars()
 	idStr, ok := vars["id"]
@@ -81,22 +119,27 @@ func (s *EmployeeService) UpdateEmployee(ctx khttp.Context) error {
 		return errors.BadRequest("INVALID_ID", "employee id must be a number")
 	}
 
-	if err := ctx.Bind(&emp); err != nil {
-		return errors.BadRequest("INVALID_BODY", err.Error())
-	}
+	employee := FromUpdateRequest(&req)
+	employee.ID = id
 
-	emp.ID = id
-
-	res, err := s.uc.UpdateEmployee(ctx, &emp)
+	updated, err := s.uc.UpdateEmployee(ctx, employee)
 	if err != nil {
-		return err
+		switch err.Error() {
+		case "employee not found":
+			return errors.NotFound("EMPLOYEE_NOT_FOUND", err.Error())
+		case "employee with this email already exists":
+			return errors.Conflict("DUPLICATE_EMPLOYEE", err.Error())
+		default:
+			return errors.New(500, "SERVER_ERROR", err.Error())
+
+		}
 	}
 
-	return ctx.JSON(http.StatusOK, res)
+	resp := ToEmployeeResponse(updated)
+	return ctx.JSON(http.StatusOK, resp)
 }
 
 func (s *EmployeeService) DeleteEmployee(ctx khttp.Context) error {
-
 	vars := ctx.Vars()
 	idStr, ok := vars["id"]
 	if !ok {
@@ -109,7 +152,13 @@ func (s *EmployeeService) DeleteEmployee(ctx khttp.Context) error {
 	}
 
 	if err := s.uc.DeleteEmployee(ctx, id); err != nil {
-		return err
+		switch err.Error() {
+		case "employee not found":
+			return errors.NotFound("EMPLOYEE_NOT_FOUND", err.Error())
+		default:
+			return errors.New(500, "SERVER_ERROR", err.Error())
+
+		}
 	}
 
 	return ctx.JSON(http.StatusNoContent, nil)
